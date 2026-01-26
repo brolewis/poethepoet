@@ -154,6 +154,24 @@ def _format_zsh_help(text: str | None, max_len: int = 60) -> str:
     return text.replace("\\", "\\\\").replace(":", "\\:").replace("\t", " ")
 
 
+def _escape_zsh_choice(value: str) -> str:
+    """
+    Escape a choice value for use in a zsh array.
+
+    Quotes the value with single quotes if it contains special characters
+    (spaces, tabs, newlines, quotes, backslash, $, backtick).
+    Single quotes within the value are escaped as '\\'' (end quote, escaped quote, start quote).
+    """
+    if not value:
+        return value
+    # Characters that require quoting
+    if any(c in value for c in " \t\n\"'\\$`"):
+        # Escape single quotes by ending the quote, adding escaped quote, starting new quote
+        escaped = value.replace("'", "'\\''")
+        return f"'{escaped}'"
+    return value
+
+
 def _list_tasks(target_path: str | None = None):
     """
     A special task accessible via `poe _list_tasks` for use in shell completion
@@ -214,13 +232,13 @@ def _zsh_task_args(task_name: str, target_path: str | None = None):
     - options: comma-separated option strings (e.g., "--greeting,-g")
     - type: "boolean", "string", "integer", "float", or "positional"
     - help: description text (colons escaped as \\:)
-    - choices: space-separated list of allowed values (empty if no choices)
+    - choices: space-separated list of allowed values ("_" if no choices)
 
     Example output:
-        --greeting,-g   string  The greeting to use
-        --upper boolean Make uppercase
-        --flavor    string  Ice cream flavor vanilla chocolate strawberry
-        name    positional  The name argument
+        --greeting,-g   string  The greeting to use     _
+        --verbose,-v    boolean Verbose mode            _
+        --flavor,-f     string  Flavor                  vanilla chocolate strawberry
+        name    positional  The name argument           _
     """
     try:
         from .config import PoeConfig
@@ -240,30 +258,30 @@ def _zsh_task_args(task_name: str, target_path: str | None = None):
         for arg in ArgSpec.normalize(args_def, strict=False):
             help_text = _format_zsh_help(arg.get("help"))
 
-            # Format choices as space-separated values
-            # Escape spaces within choices by quoting
-            choices = " ".join(
-                repr(str_choice) if " " in str_choice else str_choice
+            # Format choices as space-separated values with proper escaping
+            # Use "_" as placeholder for empty (zsh read skips consecutive tabs)
+            choices_list = [
+                _escape_zsh_choice(str_choice)
                 for choice in (arg.get("choices") or [])
                 if (str_choice := str(choice))
-            )
+            ]
+            choices = " ".join(choices_list) if choices_list else "_"
 
             arg_details: list[str] = []
 
             if arg.get("positional"):
                 if name := arg.get("name", ""):
-                    arg_details = [name, "positional", help_text]
+                    arg_details = [name, "positional", help_text, choices]
             else:
                 # Join all option strings for this arg
                 arg_details = [
                     ",".join(arg.get("options")),
                     arg.get("type", "string"),
                     help_text,
+                    choices,
                 ]
 
             if arg_details:
-                if choices:
-                    arg_details.append(choices)
                 print("\t".join(arg_details))
 
     except Exception:

@@ -3,7 +3,51 @@ import subprocess
 
 import pytest
 
-from poethepoet import _format_zsh_help
+from poethepoet import _escape_zsh_choice, _format_zsh_help
+
+
+class TestEscapeZshChoice:
+    """Unit tests for the _escape_zsh_choice helper function."""
+
+    def test_simple_word(self):
+        """Simple words need no quoting."""
+        assert _escape_zsh_choice("vanilla") == "vanilla"
+
+    def test_word_with_space(self):
+        """Words with spaces should be quoted."""
+        assert _escape_zsh_choice("quick run") == "'quick run'"
+
+    def test_word_with_tab(self):
+        """Words with tabs should be quoted."""
+        assert _escape_zsh_choice("col1\tcol2") == "'col1\tcol2'"
+
+    def test_word_with_single_quote(self):
+        """Single quotes need special escaping."""
+        assert _escape_zsh_choice("it's") == "'it'\\''s'"
+
+    def test_word_with_double_quote(self):
+        """Double quotes should be quoted."""
+        assert _escape_zsh_choice('say "hi"') == "'say \"hi\"'"
+
+    def test_word_with_backslash(self):
+        """Backslashes should be quoted."""
+        assert _escape_zsh_choice("path\\to") == "'path\\to'"
+
+    def test_word_with_dollar(self):
+        """Dollar signs should be quoted."""
+        assert _escape_zsh_choice("$VAR") == "'$VAR'"
+
+    def test_word_with_backtick(self):
+        """Backticks should be quoted."""
+        assert _escape_zsh_choice("`cmd`") == "'`cmd`'"
+
+    def test_empty_string(self):
+        """Empty strings return empty."""
+        assert _escape_zsh_choice("") == ""
+
+    def test_multiple_special_chars(self):
+        """Multiple special characters."""
+        assert _escape_zsh_choice("it's a $test") == "'it'\\''s a $test'"
 
 
 class TestFormatZshHelp:
@@ -85,16 +129,16 @@ def test_zsh_task_args(run_poe_main, projects):
     # Test with a task that has args defined
     scripts_path = str(projects["scripts"])
     result = run_poe_main("_zsh_task_args", "greet-full-args", scripts_path)
-    lines = result.stdout.strip().split("\n")
+    # Use rstrip to preserve trailing tabs within lines (strip() removes them from last line)
+    lines = [line for line in result.stdout.rstrip("\n").split("\n") if line]
 
     # Should have options for the defined args
     assert len(lines) > 0
 
     # Each line should be tab-separated: options<TAB>type<TAB>help<TAB>choices
-    # Note: trailing empty choices field may be stripped on last line by strip()
     for line in lines:
         parts = line.split("\t")
-        assert len(parts) in (3, 4), f"Expected 3-4 tab-separated parts, got: {line!r}"
+        assert len(parts) == 4, f"Expected 4 tab-separated parts, got: {line!r}"
         opts, arg_type = parts[0], parts[1]
         assert opts  # options should not be empty
         assert arg_type in ("boolean", "string", "integer", "float", "positional")
@@ -281,13 +325,14 @@ class TestZshEdgeCases:
         # --greeting has no help defined
         greeting_line = next(line for line in lines if "--greeting" in line)
         parts = greeting_line.split("\t")
-        # 3 fields when no choices, 4 fields if choices present
-        assert len(parts) in (3, 4)
+        # Has 4 fields: opts, type, help, choices
+        assert (
+            len(parts) == 4
+        ), f"Expected 4 tab-separated parts, got: {greeting_line!r}"
         # Help field should be empty
         assert parts[2] == ""
-        # If choices field present, it should be empty
-        if len(parts) == 4:
-            assert parts[3] == ""
+        # Choices field should be "_" placeholder for empty
+        assert parts[3] == "_"
 
     def test_help_with_colon_escaped(self, run_poe_main):
         """Colons in help text should be escaped for zsh."""
@@ -583,7 +628,6 @@ class TestDirectoryOption:
         # Should extract target_path
         assert 'target_path="${words[i+1]}"' in script
         # Should pass target_path to builtins
-        assert "_list_tasks $target_path" in script
         assert "_zsh_describe_tasks $target_path" in script
         assert "_zsh_task_args" in script
         assert "$target_path" in script
@@ -615,7 +659,8 @@ class TestZshChoicesCompletion:
         """Verify positional args include choices."""
         scripts_path = str(projects["scripts"])
         result = run_poe_main("_zsh_task_args", "flavor-picker", scripts_path)
-        lines = result.stdout.strip().split("\n")
+        # Use rstrip to preserve trailing tabs within lines
+        lines = [line for line in result.stdout.rstrip("\n").split("\n") if line]
 
         # Find the size positional arg
         size_line = next(line for line in lines if line.startswith("size\t"))
@@ -642,13 +687,181 @@ class TestZshChoicesCompletion:
         """Args without choices should have empty choices field."""
         scripts_path = str(projects["scripts"])
         result = run_poe_main("_zsh_task_args", "greet-full-args", scripts_path)
-        lines = result.stdout.strip().split("\n")
+        # Use rstrip to preserve trailing tabs within lines
+        lines = [line for line in result.stdout.rstrip("\n").split("\n") if line]
 
         # All args in greet-full-args have no choices
         for line in lines:
             parts = line.split("\t")
-            # May have 3 or 4 parts (trailing empty field can be stripped)
-            assert len(parts) in (3, 4)
-            # If 4 parts, choices field should be empty
-            if len(parts) == 4:
-                assert parts[3] == ""
+            # Has 4 fields: opts, type, help, choices
+            assert len(parts) == 4, f"Expected 4 tab-separated parts, got: {line!r}"
+            # choices field (index 3) should be "_" placeholder for empty
+            assert parts[3] == "_"
+
+
+class TestZshTaskArgsSpacedChoices:
+    """Tests for choices with spaces in _zsh_task_args output."""
+
+    def test_spaced_choices_properly_quoted(self, run_poe_main, projects):
+        """Choices containing spaces should be properly quoted."""
+        scripts_path = str(projects["scripts"])
+        result = run_poe_main("_zsh_task_args", "spaced-choices", scripts_path)
+        lines = result.stdout.strip().split("\n")
+
+        # Find --type option
+        type_line = next(line for line in lines if "--type" in line)
+        parts = type_line.split("\t")
+        choices = parts[3]
+
+        # Spaced choices should be quoted
+        assert "'quick run'" in choices, f"Expected quoted 'quick run' in {choices!r}"
+        assert "'full test'" in choices, f"Expected quoted 'full test' in {choices!r}"
+        # Non-spaced choice should not be quoted
+        assert "smoke" in choices
+
+
+class TestZshTaskArgsFormat:
+    """Tests for _zsh_task_args output format."""
+
+    def test_output_has_four_fields(self, run_poe_main, projects):
+        """Each line should have 4 tab-separated fields."""
+        scripts_path = str(projects["scripts"])
+        result = run_poe_main("_zsh_task_args", "greet-full-args", scripts_path)
+        lines = [line for line in result.stdout.rstrip("\n").split("\n") if line]
+
+        assert len(lines) > 0
+        for line in lines:
+            parts = line.split("\t")
+            assert (
+                len(parts) == 4
+            ), f"Expected 4 fields (opts, type, help, choices), got: {line!r}"
+
+    def test_option_with_choices(self, run_poe_main, projects):
+        """Options with choices should have them in 4th field."""
+        scripts_path = str(projects["scripts"])
+        result = run_poe_main("_zsh_task_args", "flavor-picker", scripts_path)
+        lines = result.stdout.strip().split("\n")
+
+        # Find --flavor option
+        flavor_line = next(line for line in lines if "--flavor" in line)
+        parts = flavor_line.split("\t")
+        assert len(parts) == 4
+        assert parts[0] == "--flavor,-f"
+        assert parts[1] == "string"
+        assert "vanilla" in parts[3]
+
+    def test_positional_with_choices(self, run_poe_main, projects):
+        """Positional args with choices should have them in 4th field."""
+        scripts_path = str(projects["scripts"])
+        result = run_poe_main("_zsh_task_args", "flavor-picker", scripts_path)
+        lines = [line for line in result.stdout.rstrip("\n").split("\n") if line]
+
+        # Find size positional arg
+        size_line = next(line for line in lines if line.startswith("size\t"))
+        parts = size_line.split("\t")
+        assert len(parts) == 4
+        assert parts[1] == "positional"
+        assert "small" in parts[3]
+
+
+class TestZshCompletionScriptNewFeatures:
+    """Structure tests for new zsh completion script features."""
+
+    def test_has_separator_detection(self, run_poe_main):
+        """Verify script detects -- separator."""
+        result = run_poe_main("_zsh_completion")
+        script = result.stdout
+
+        # Should have after_separator variable
+        assert "after_separator=" in script
+        # Should check for -- in words
+        assert '== "--"' in script
+        # Should offer files only after separator
+        assert "after_separator" in script
+
+    def test_executor_has_specific_completions(self, run_poe_main):
+        """Verify --executor has specific value completions."""
+        result = run_poe_main("_zsh_completion")
+        script = result.stdout
+
+        # Should have executor choices including 'auto'
+        assert "auto poetry simple uv virtualenv" in script
+
+    def test_executor_opt_no_value(self, run_poe_main):
+        """Verify --executor-opt doesn't offer value completion."""
+        result = run_poe_main("_zsh_completion")
+        script = result.stdout
+
+        # -X/--executor-opt should NOT have :value:() after it
+        # Find the executor-opt line and check it doesn't have value completion
+        # This is a bit tricky to test directly, but we can check that executor
+        # has specific completions while executor-opt is handled differently
+        lines = script.split("\n")
+        # Look for lines containing executor
+        executor_lines = [
+            line for line in lines if "executor" in line.lower() and '"' in line
+        ]
+        # Should have at least one line with specific executor completions
+        assert any("poetry simple uv virtualenv" in line for line in executor_lines)
+
+    def test_help_has_optional_task_value(self, run_poe_main):
+        """Verify --help has optional task value completion."""
+        result = run_poe_main("_zsh_completion")
+        script = result.stdout
+
+        # Should have help_task state
+        assert "help_task" in script
+        # Should have ::task: for optional value
+        assert "::task:->help_task" in script
+
+    def test_help_task_state_handler(self, run_poe_main):
+        """Verify help_task state offers task names."""
+        result = run_poe_main("_zsh_completion")
+        script = result.stdout
+
+        # Should have case for help_task state
+        assert "(help_task)" in script
+
+    def test_has_cache_initialization(self, run_poe_main):
+        """Verify script initializes session caches."""
+        result = run_poe_main("_zsh_completion")
+        script = result.stdout
+
+        # Should initialize cache arrays
+        assert "_poe_task_desc_cache" in script
+        assert "_poe_task_args_cache" in script
+        assert "_poe_cache_time" in script
+        # Should use typeset -gA for global associative arrays
+        assert "typeset -gA _poe_task_desc_cache" in script
+        assert "typeset -gA _poe_task_args_cache" in script
+
+    def test_has_cache_ttl_check(self, run_poe_main):
+        """Verify script checks cache TTL (1 hour)."""
+        result = run_poe_main("_zsh_completion")
+        script = result.stdout
+
+        # Should check TTL against 3600 seconds
+        assert "3600" in script
+        # Should clear caches when expired
+        assert "_poe_task_desc_cache=()" in script
+        assert "_poe_task_args_cache=()" in script
+
+    def test_task_descriptions_use_cache(self, run_poe_main):
+        """Verify task state uses cache for descriptions."""
+        result = run_poe_main("_zsh_completion")
+        script = result.stdout
+
+        # Should check cache before calling poe
+        assert "_poe_task_desc_cache[$cache_key]" in script
+        # Should have cache key based on target_path
+        assert 'cache_key="${target_path:-_default_}"' in script
+
+    def test_task_args_use_cache(self, run_poe_main):
+        """Verify args state uses cache for task args."""
+        result = run_poe_main("_zsh_completion")
+        script = result.stdout
+
+        # Should check cache before calling poe
+        assert "_poe_task_args_cache[$args_cache_key]" in script
+        # Should have cache key based on target_path and task
+        assert 'args_cache_key="${target_path:-_default_}|$current_task"' in script

@@ -2,7 +2,12 @@
 
 Poe the Poet is a task runner for Python projects that integrates with poetry and uv.
 
-## Quick Commands
+## Use poe tasks
+
+This project uses poethepoet to manage development tasks. Prefer to use poe tasks when available to reduce friction.
+
+Run `poe` to see available tasks and their descriptions.
+
 
 ```bash
 poe check             # run all quality checks (style, types, lint, tests) - this takes a while.
@@ -18,6 +23,16 @@ poe types             # mypy type checking
 poe test tests/test_script_tasks.py -k "test_running"
 poe test-quick -x  # stop on first failure
 ```
+
+### Testing
+
+Run tests with:
+
+```sh
+poe test [extra pytest arguments]
+```
+
+Reference tests/README.md for instructions on how to write, run, and debug tests in this project.
 
 ## Key Patterns
 

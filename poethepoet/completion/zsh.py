@@ -16,12 +16,31 @@ if TYPE_CHECKING:
 # Must run BEFORE _arguments since $words gets modified in state handlers
 _TARGET_PATH_LOGIC = """
     local DIR_ARGS=("-C" "--directory" "--root")
+    # Other options that take a value (must skip their value when finding task name)
+    local VALUE_OPTS=("-e" "--executor" "-h" "--help" "-X" "--executor-opt")
 
     local target_path=""
     local current_task=""
+    local after_separator=0
 
-    # Find target_path from -C/--directory/--root and potential task
+    # Initialize session caches if not exists (persist across completion invocations)
+    (( ${+_poe_task_desc_cache} )) || typeset -gA _poe_task_desc_cache
+    (( ${+_poe_task_args_cache} )) || typeset -gA _poe_task_args_cache
+    (( ${+_poe_cache_time} )) || typeset -g _poe_cache_time=$SECONDS
+
+    # Check TTL - clear if expired (1 hour = 3600 seconds)
+    if (( SECONDS - _poe_cache_time > 3600 )); then
+        _poe_task_desc_cache=()
+        _poe_task_args_cache=()
+        _poe_cache_time=$SECONDS
+    fi
+
+    # Find target_path from -C/--directory/--root, potential task, and -- separator
     for ((i=2; i<${#words[@]}; i++)); do
+        if [[ "${words[i]}" == "--" ]]; then
+            after_separator=1
+            break
+        fi
         if (( $DIR_ARGS[(Ie)${words[i]}] )); then
             if (( ($i+1) >= ${#words[@]} )); then
                 _files
@@ -29,11 +48,20 @@ _TARGET_PATH_LOGIC = """
             fi
             target_path="${words[i+1]}"
             i=$i+1
+        elif (( $VALUE_OPTS[(Ie)${words[i]}] )); then
+            # Skip the value for this option (don't treat it as task name)
+            i=$i+1
         elif [[ "${words[i]}" != -* && -z "$current_task" ]]; then
             # First non-option word is potential task (validated later if needed)
             current_task="${words[i]}"
         fi
     done
+
+    # After --, only offer file completions (pass-through args to task)
+    if (( after_separator )); then
+        _files
+        return
+    fi
 """
 
 
@@ -49,6 +77,7 @@ def _get_task_args_completion(name: str) -> str:
     - Value options (string/integer/float): with value placeholder or choices
     - Positional args: file completion or choices
     - Multiple option forms: mutual exclusivity
+    - Option filtering: skip options that have already been used
     """
     return f"""\
             # Complete task-specific arguments using _arguments
@@ -57,8 +86,51 @@ def _get_task_args_completion(name: str) -> str:
 
             [[ -z "$current_task" ]] && {{ _files; return; }}
 
+            # Count existing options in command line for filtering
+            local -A option_counts
+            for ((i=2; i<${{#words[@]}}; i++)); do
+                local w="${{words[i]}}"
+                [[ "$w" == -* && "$w" != "--" ]] && (( option_counts[$w]++ ))
+            done
+
+            # Check cache for task args
+            local args_cache_key="${{target_path:-_default_}}|$current_task"
+            local task_args_data
+            if [[ -v _poe_task_args_cache[$args_cache_key] ]]; then
+                task_args_data="${{_poe_task_args_cache[$args_cache_key]}}"
+            else
+                task_args_data="$({name} _zsh_task_args "$current_task" $target_path 2>/dev/null)"
+                _poe_task_args_cache[$args_cache_key]="$task_args_data"
+            fi
+
             while IFS=$'\\t' read -r opts arg_type help_text choices; do
                 [[ -z "$opts" ]] && continue
+
+                # Convert "_" placeholder back to empty (zsh read skips consecutive tabs)
+                [[ "$choices" == "_" ]] && choices=""
+
+                # Skip options that have already been used (positional args have their own rules)
+                # BUT: don't skip if we're completing the value for this option (prev word is the option)
+                if [[ "$arg_type" != "positional" ]]; then
+                    local prev_word="${{words[CURRENT-1]}}"
+                    local -a opt_arr=(${{(s:,:)opts}})
+
+                    # Check if we're completing value for this option
+                    local completing_value=0
+                    for opt in $opt_arr; do
+                        [[ "$prev_word" == "$opt" ]] && completing_value=1
+                    done
+
+                    # Only filter if not completing value for this option
+                    if (( ! completing_value )); then
+                        local total_count=0
+                        for opt in $opt_arr; do
+                            (( total_count += ${{option_counts[$opt]:-0}} ))
+                        done
+                        # Skip if already used
+                        (( total_count >= 1 )) && continue
+                    fi
+                fi
 
                 # Build value completion spec: use choices if available
                 if [[ -n "$choices" ]]; then
@@ -109,7 +181,7 @@ def _get_task_args_completion(name: str) -> str:
                             ;;
                     esac
                 fi
-            done < <({name} _zsh_task_args "$current_task" $target_path 2>/dev/null)
+            done <<< "$task_args_data"
 
             # Fallback to _files if no args defined
             if (( ${{#arg_specs[@]}} == 0 )); then
@@ -140,14 +212,27 @@ def _format_global_options(
         if option.help == "==SUPPRESS==":
             continue
 
-        # help and version are special cases that don't go with other args
-        if option.dest in ["help", "version"]:
+        # help and version are mutually exclusive with each other, but can follow other options
+        # (e.g., `poe -C path --help` should work)
+        if option.dest == "help":
+            # --help can optionally take a task name
             options_part = (
                 option.option_strings[0]
                 if len(option.option_strings) == 1
                 else '"{' + ",".join(sorted(option.option_strings)) + '}"'
             )
-            args_lines.append(f'"(- *){options_part}[{option.help}]"')
+            args_lines.append(
+                f'"($ALL_EXLC){options_part}[{option.help}]::task:->help_task"'
+            )
+            continue
+
+        if option.dest == "version":
+            options_part = (
+                option.option_strings[0]
+                if len(option.option_strings) == 1
+                else '"{' + ",".join(sorted(option.option_strings)) + '}"'
+            )
+            args_lines.append(f'"($ALL_EXLC){options_part}[{option.help}]"')
             continue
 
         # collect other options that are exclusive to this one
@@ -187,9 +272,18 @@ def _format_global_options(
         )
 
         if takes_value:
-            # Add value placeholder - use _files for directory options, empty for others
+            # Add value placeholder based on option type
             if option.dest == "project_root":
                 args_lines.append(f'"{options_part}[{option.help}]:directory:_files"')
+            elif option.dest == "executor":
+                # Known executor types
+                args_lines.append(
+                    f'"{options_part}[{option.help}]'
+                    ':executor:(auto poetry simple uv virtualenv)"'
+                )
+            elif option.dest == "executor_options":
+                # -X/--executor-opt takes arbitrary key=value, no useful completion
+                args_lines.append(f'"{options_part}[{option.help}]"')
             else:
                 args_lines.append(f'"{options_part}[{option.help}]:value:()"')
         else:
@@ -228,10 +322,35 @@ def get_zsh_completion_script(name: str = "") -> str:
 
     args_lines = _format_global_options(global_options, excl_groups)
 
-    # Task state: load descriptions only when completing task names
+    # Task state: load descriptions only when completing task names (with caching)
     task_state_handler = f"""\
+            # Don't show tasks if user is typing an option (starts with -)
+            [[ ${{words[CURRENT]}} == -* ]] && return
+
             local -a task_descriptions
-            task_descriptions=(${{(f)"$({name} _zsh_describe_tasks $target_path)"}})
+            local cache_key="${{target_path:-_default_}}"
+            if [[ -v _poe_task_desc_cache[$cache_key] ]]; then
+                task_descriptions=(${{(f)_poe_task_desc_cache[$cache_key]}})
+            else
+                local result
+                result="$({name} _zsh_describe_tasks $target_path 2>/dev/null)"
+                _poe_task_desc_cache[$cache_key]="$result"
+                task_descriptions=(${{(f)result}})
+            fi
+            _describe 'task' task_descriptions"""
+
+    # help_task state: offer task names for --help [task] (with caching)
+    help_task_state_handler = f"""\
+            local -a task_descriptions
+            local cache_key="${{target_path:-_default_}}"
+            if [[ -v _poe_task_desc_cache[$cache_key] ]]; then
+                task_descriptions=(${{(f)_poe_task_desc_cache[$cache_key]}})
+            else
+                local result
+                result="$({name} _zsh_describe_tasks $target_path 2>/dev/null)"
+                _poe_task_desc_cache[$cache_key]="$result"
+                task_descriptions=(${{(f)result}})
+            fi
             _describe 'task' task_descriptions"""
 
     return "\n".join(
@@ -248,10 +367,15 @@ def get_zsh_completion_script(name: str = "") -> str:
             "        (task)",
             task_state_handler,
             "            ;;",
+            "        (help_task)",
+            help_task_state_handler,
+            "            ;;",
             "        (args)",
             _get_task_args_completion(name),
             "            ;;",
             "    esac",
             "}",
+            "",
+            f"compdef _{name} {name}",
         ]
     )

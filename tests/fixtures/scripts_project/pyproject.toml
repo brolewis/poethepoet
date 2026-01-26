@@ -196,6 +196,33 @@ script = "pkg:echo_script(dry=_dry_run, verbosity=environ['POE_VERBOSITY'])"
 [tool.poe.tasks.module-as-task]
 script = "pkg"
 
+# Test fixtures for shell completion testing
+[tool.poe.tasks.multiple-values]
+script = "pkg:echo_script(files=files, pair=pair)"
+help = "Test multiple values per option"
+
+[[tool.poe.tasks.multiple-values.args]]
+name = "files"
+options = ["--files", "-f"]
+multiple = true
+help = "Accepts multiple file paths"
+
+[[tool.poe.tasks.multiple-values.args]]
+name = "pair"
+options = ["--pair", "-p"]
+multiple = 2
+help = "Accepts exactly 2 values"
+
+[tool.poe.tasks.spaced-choices]
+script = "pkg:echo_script(test_type=test_type)"
+help = "Test choices with spaces"
+
+[[tool.poe.tasks.spaced-choices.args]]
+name = "test_type"
+options = ["--type", "-t"]
+choices = ["quick run", "full test", "smoke"]
+help = "Type of test"
+
 [build-system]
 requires = ["poetry>=0.12"]
 build-backend = "poetry.masonry.api"
